@@ -1,3 +1,4 @@
+<script>
 /**
  * Starwood attribution
  *
@@ -28,7 +29,11 @@
  * Quote app links receive:
  *   utm_* (utm_source/utm_medium only when source_type is utm), click IDs, hsa_*,
  *   swp_source, swp_medium, swp_source_type, swp_referrer, swp_landing_page,
- *   and referrer=<current www page URL>.
+ *   and referrer=<current www page URL without tracking params>.
+ *
+ * Once consent is granted and the touch is stored in cookies, the swp_* carry params are
+ * removed from the address bar. utm_*, click IDs and hsa_* are left in place because other
+ * tags may still read them.
  *
  * Browser support: ES2022 (current Chrome, Edge, Safari, Firefox). No build step required.
  * Tests: starwood-attribution.test.js (node --test).
@@ -48,7 +53,7 @@
     consentCategory: 'advertisement', // HubSpot banner category: advertisement | analytics | functionality
     directOverwritesLatest: false,    // true = a direct visit replaces an existing latest touch
     carryWithoutConsent: true,        // carry the touch on internal links when cookies are not allowed
-    debug: false
+    debug: true                       // set to false after testing
   };
 
   const UTM_FIELDS = {
@@ -79,7 +84,7 @@
 
   const SKIP_HREF = /^(#|mailto:|tel:|sms:|javascript:)/i;
 
-  const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, (c) => '\\' + c);
 
   // Keys ending in "." match any TLD (google.co.uk). Others match the domain and its subdomains.
   const hostPattern = (key) => key.endsWith('.')
@@ -350,13 +355,28 @@
     }
   };
 
+  // Page URL without tracking params, so the referrer is not bloated with repeated touch data.
+  const cleanPageUrl = (pageUrl) => {
+    try {
+      const p = new URL(pageUrl);
+      for (const key of [...p.searchParams.keys()]) {
+        if (isTrackedKey(key.toLowerCase()) || Object.hasOwn(CARRY, key.toLowerCase())) {
+          p.searchParams.delete(key);
+        }
+      }
+      return p.toString();
+    } catch {
+      return pageUrl;
+    }
+  };
+
   // Decorated href for a link. Params already on the link are kept.
   const buildHref = (href, pageUrl = location.href) => {
     try {
       const u = new URL(href, pageUrl);
       if (isQuoteLink(u)) {
         appendParams(u, touchToParams(getActiveTouch()));
-        if (!u.searchParams.has('referrer')) u.searchParams.set('referrer', pageUrl);
+        if (!u.searchParams.has('referrer')) u.searchParams.set('referrer', cleanPageUrl(pageUrl));
         return u.toString();
       }
       if (shouldCarry(u)) {
@@ -388,6 +408,36 @@
   // Covers links rendered after load. mousedown includes middle and right click.
   const onInteract = (e) => decorate(e.target?.closest?.('a'));
 
+  // --- Address bar cleanup ---
+
+  // Removes the swp_* carry params from the address bar once the touch is safely in cookies.
+  // utm_*, click IDs and hsa_* are left alone because other tags may still read them.
+  const cleanAddressBar = () => {
+    try {
+      const url = new URL(location.href);
+      let changed = false;
+      for (const key of [...url.searchParams.keys()]) {
+        if (Object.hasOwn(CARRY, key.toLowerCase())) {
+          url.searchParams.delete(key);
+          changed = true;
+        }
+      }
+      if (changed) {
+        history.replaceState(history.state, '', url.toString());
+        log('address bar cleaned');
+      }
+    } catch {
+      // leave the URL as it is
+    }
+  };
+
+  // --- Init ---
+  // The touch is built before the consent listener is registered. HubSpot can
+  // report consent immediately, and persist() needs state.current to exist.
+
+  state.current = buildTouch();
+  log('touch', state.current);
+
   // --- HubSpot consent ---
 
   const hasConsent = (consent) => {
@@ -398,21 +448,19 @@
 
   const _hsp = (window._hsp = window._hsp || []);
   _hsp.push(['addPrivacyConsentListener', (consent) => {
+    const hadConsent = state.consent;
     state.consent = hasConsent(consent);
     log('consent', state.consent, consent);
     if (state.consent) {
       state.latest = getCookie(CONFIG.latestTouchCookie);
       persist();
-    } else {
+      if (getCookie(CONFIG.latestTouchCookie)) cleanAddressBar();
+    } else if (hadConsent) {
+      // Only clear when consent is revoked, not on HubSpot's initial "not allowed" report.
       clearStored();
     }
     decorateAll();
   }]);
-
-  // --- Init ---
-
-  state.current = buildTouch();
-  log('touch', state.current);
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', decorateAll);
@@ -432,3 +480,4 @@
     hasConsent: () => state.consent
   });
 })();
+</script>
